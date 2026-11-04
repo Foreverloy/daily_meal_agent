@@ -1,0 +1,20 @@
+include:
+  - ../daily_meal/compose.yaml
+
+services:
+  agent:
+    build: .
+    env_file: .env
+    environment:
+      MEAL_API_URL: http://api:8080
+      REQUEST_DB: /data/requests.sqlite3
+    volumes:
+      - agent_requests:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      api:
+        condition: service_started
+
+volumes:
+  agent_requests:

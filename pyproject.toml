@@ -1,0 +1,26 @@
+[project]
+name = "daily-meal-agent"
+version = "0.1.0"
+description = "Daily Meal 的 Python 对话服务"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "httpx>=0.28,<1",
+    "langchain-core>=1,<2",
+    "langchain-openai>=1,<2",
+    "pydantic-settings>=2,<3",
+    "uvicorn>=0.34,<1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
