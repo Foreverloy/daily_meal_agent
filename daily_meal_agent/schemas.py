@@ -1,22 +1,21 @@
 from typing import Any, Literal
-from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 Unit = Literal["g", "kg", "ml", "L"]
 Meal = Literal["breakfast", "lunch", "dinner"]
 
 
-class Message(BaseModel):
-    role: Literal["user", "assistant"]
-    content: str
+class ModelSettings(BaseModel):
+    api_key: SecretStr
+    base_url: str
+    model: str
+    use_responses_api: bool
 
 
 class ChatRequest(BaseModel):
-    # 每条新消息生成一个 UUID；重发同一条消息时复用，供 Agent 查询执行状态。
-    request_id: UUID
     message: str = Field(min_length=1)
-    history: list[Message] = Field(default_factory=list)
+    model_settings: ModelSettings
 
 
 class ToolResult(BaseModel):
@@ -26,9 +25,7 @@ class ToolResult(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    request_id: UUID
     reply: str
-    history: list[Message]
     tool_results: list[ToolResult]
 
 

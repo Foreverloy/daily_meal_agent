@@ -5,7 +5,6 @@ from langchain_core.messages import AIMessage
 
 from daily_meal_agent.client import MealClient
 from daily_meal_agent.main import create_app
-from daily_meal_agent.request_log import RequestLog
 from daily_meal_agent.service import ChatService
 
 
@@ -36,7 +35,7 @@ def tool_call(name, arguments, call_id="call_1"):
 
 
 @pytest.fixture
-def app_factory(tmp_path):
+def app_factory():
     opened = []
 
     def build(replies, handler):
@@ -45,10 +44,21 @@ def app_factory(tmp_path):
             base_url="http://meal-api", transport=httpx.MockTransport(handler)
         )
         opened.append(http)
-        log = RequestLog(str(tmp_path / "requests.sqlite3"))
-        service = ChatService(model, MealClient(http), log, "Asia/Shanghai")
-        return TestClient(create_app(service)), model, log
+        service = ChatService(model, MealClient(http), "Asia/Shanghai")
+        return TestClient(create_app(service)), model
 
     yield build
     for http in opened:
         http.close()
+
+
+def payload(message="今天午餐吃了 200g 米饭"):
+    return {
+        "message": message,
+        "model_settings": {
+            "api_key": "test-key",
+            "base_url": "http://model/v1",
+            "model": "test-model",
+            "use_responses_api": True,
+        },
+    }

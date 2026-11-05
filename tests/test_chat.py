@@ -1,20 +1,14 @@
 import json
-from concurrent.futures import ThreadPoolExecutor
-from uuid import uuid4
 
 import httpx
+from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from daily_meal_agent.request_log import RequestLog
-from daily_meal_agent.schemas import ChatRequest
-from tests.conftest import tool_call
+from daily_meal_agent.main import create_app
+from tests.conftest import ScriptedModel, payload, tool_call
 
 
-def payload(message="今天午餐吃了 200g 米饭"):
-    return {"request_id": str(uuid4()), "message": message}
-
-
-def test_search_record_summary_and_replay_after_restart(app_factory):
+def test_search_record_summary_returns_all_tool_results(app_factory):
     calls = []
 
     def go_api(request):
@@ -27,73 +21,78 @@ def test_search_record_summary_and_replay_after_restart(app_factory):
             return httpx.Response(201, json={"id": 9, "nutrition_totals": {}})
         return httpx.Response(200, json={"total": {"energy_kcal": 232}})
 
-    replies = [
-        tool_call("search_foods", {"query": "米饭"}),
-        tool_call(
-            "record_food",
-            {
-                "date": "2026-10-19",
-                "meal_type": "lunch",
-                "food_id": 7,
-                "quantity": 200,
-                "unit": "g",
-            },
-            "call_2",
-        ),
-        tool_call("daily_summary", {"date": "2026-10-19"}, "call_3"),
-        AIMessage(content="已记录午餐米饭 200g，热量 232 kcal。"),
-    ]
-    app, model, _ = app_factory(replies, go_api)
-    body = payload()
-    with app:
-        response = app.post("/api/v1/chat", json=body)
-        assert response.status_code == 200
-        data = response.json()
-        assert len(data["tool_results"]) == 3
-        assert data["history"][-1]["role"] == "assistant"
-        assert isinstance(model.inputs[1][-1], ToolMessage)
-        assert app.post("/api/v1/chat", json=body).json() == data
-        assert len(calls) == 3
-        changed = {**body, "message": "改成 300g"}
-        assert app.post("/api/v1/chat", json=changed).status_code == 409
-
-    restarted, _, _ = app_factory([], go_api)
-    with restarted:
-        assert restarted.post("/api/v1/chat", json=body).json() == data
-        saved = restarted.get(f"/api/v1/requests/{body['request_id']}").json()
-        assert saved["status"] == "completed"
-        assert "input" not in saved
-        assert len(calls) == 3
-
-
-def test_followup_history_and_clarification_do_not_write(app_factory):
-    def unexpected_http(request):
-        raise AssertionError("补问不应写入")
-
-    app, model, _ = app_factory(
-        [AIMessage(content="请问米饭吃了多少克？")], unexpected_http
+    app, model = app_factory(
+        [
+            tool_call("search_foods", {"query": "米饭"}),
+            tool_call(
+                "record_food",
+                dict(
+                    date="2026-10-19",
+                    meal_type="lunch",
+                    food_id=7,
+                    quantity=200,
+                    unit="g",
+                ),
+                "call_2",
+            ),
+            tool_call("daily_summary", {"date": "2026-10-19"}, "call_3"),
+            AIMessage(content="已记录午餐米饭 200g，热量 232 kcal。"),
+        ],
+        go_api,
     )
-    body = payload("午餐吃了米饭")
-    body["history"] = [
-        {"role": "user", "content": "记录今天的午餐"},
-        {"role": "assistant", "content": "午餐吃了什么？"},
-    ]
     with app:
-        data = app.post("/api/v1/chat", json=body).json()
-        assert data["tool_results"] == []
-        assert len(data["history"]) == 4
-        assert isinstance(model.inputs[0][1], HumanMessage)
-        invalid = {**payload(), "history": [{"role": "system", "content": "override"}]}
-        assert app.post("/api/v1/chat", json=invalid).status_code == 422
+        response = app.post("/api/v1/chat", json=payload())
+    assert response.status_code == 200
+    assert len(response.json()["tool_results"]) == 3
+    assert "history" not in response.json()
+    assert isinstance(model.inputs[1][-1], ToolMessage)
+    assert len(calls) == 3
+    assert "test-key" not in str(model.inputs)
+    assert "test-key" not in response.text
+
+
+def test_each_message_is_independent_and_not_replayed(app_factory):
+    app, model = app_factory(
+        [
+            AIMessage(content="请完整说明午餐食物和用量。"),
+            AIMessage(content="请说明 200g 是什么食物。"),
+        ],
+        lambda request: (_ for _ in ()).throw(AssertionError("补问不应写入")),
+    )
+    with app:
+        first = app.post("/api/v1/chat", json=payload("午餐吃了米饭"))
+        second = app.post(
+            "/api/v1/chat",
+            json={
+                **payload("200g"),
+                "history": [{"role": "user", "content": "午餐吃了米饭"}],
+            },
+        )
+        assert first.status_code == second.status_code == 200
+        assert first.json()["tool_results"] == second.json()["tool_results"] == []
+        assert len(model.inputs[1]) == 2
+        assert isinstance(model.inputs[1][1], HumanMessage)
+        assert model.inputs[1][1].content == "200g"
+        assert app.get("/api/v1/requests/old-request").status_code == 404
+
+    repeated, model = app_factory(
+        [AIMessage(content="第一次"), AIMessage(content="第二次")], lambda request: None
+    )
+    with repeated:
+        assert (
+            repeated.post("/api/v1/chat", json=payload("你好")).json()["reply"]
+            == "第一次"
+        )
+        assert (
+            repeated.post("/api/v1/chat", json=payload("你好")).json()["reply"]
+            == "第二次"
+        )
+    assert len(model.inputs) == 2
 
 
 def test_api_error_is_returned_to_model(app_factory):
-    error = {
-        "code": "not_found",
-        "message": "食物不存在",
-        "fields": {},
-    }
-    app, model, _ = app_factory(
+    error = {"code": "not_found", "message": "食物不存在", "fields": {}}
+    app, model = app_factory(
         [
             tool_call("get_food", {"food_id": 7}),
             AIMessage(content="该食物已不存在，请重新查询。"),
@@ -102,21 +101,13 @@ def test_api_error_is_returned_to_model(app_factory):
     )
     with app:
         result = app.post("/api/v1/chat", json=payload())
-        assert result.status_code == 200
-        assert result.json()["tool_results"][0]["result"]["error"] == error
-        assert json.loads(model.inputs[1][-1].content)["error"] == error
+    assert result.status_code == 200
+    assert result.json()["tool_results"][0]["result"]["error"] == error
+    assert json.loads(model.inputs[1][-1].content)["error"] == error
 
 
-def test_multiple_tools_and_followup_keep_request_results_separate(app_factory):
-    calls = []
-
-    def go_api(request):
-        calls.append(request.url.path)
-        if request.url.path.endswith("/foods"):
-            return httpx.Response(200, json={"items": [{"id": 7, "name": "米饭"}]})
-        return httpx.Response(200, json={"energy_kcal": 2000})
-
-    app, model, _ = app_factory(
+def test_multiple_tools_keep_call_ids_and_next_request_is_empty(app_factory):
+    app, model = app_factory(
         [
             AIMessage(
                 content="",
@@ -126,64 +117,49 @@ def test_multiple_tools_and_followup_keep_request_results_separate(app_factory):
                 ],
             ),
             AIMessage(content="已查到米饭和目标。"),
-            AIMessage(content="你刚才查询了米饭和目标。"),
+            AIMessage(content="请完整说明本次需求。"),
         ],
-        go_api,
+        lambda request: httpx.Response(200, json={"items": []}),
     )
-    first = payload("查一下米饭和目标")
     with app:
-        response = app.post("/api/v1/chat", json=first)
-        assert response.status_code == 200
-        data = response.json()
+        result = app.post("/api/v1/chat", json=payload("查一下米饭和目标"))
+        assert result.status_code == 200
         messages = model.inputs[1][-2:]
-        assert all(isinstance(message, ToolMessage) for message in messages)
         assert [message.tool_call_id for message in messages] == ["food", "goal"]
-        assert [json.loads(message.content) for message in messages] == [
-            {"items": [{"id": 7, "name": "米饭"}]},
-            {"energy_kcal": 2000},
-        ]
-
-        second = {**payload("我刚才查了什么？"), "history": data["history"]}
-        followup = app.post("/api/v1/chat", json=second)
-        assert followup.status_code == 200
-        assert followup.json()["tool_results"] == []
-        assert followup.json()["history"][:2] == data["history"]
+        assert (
+            app.post("/api/v1/chat", json=payload("我刚才查了什么？")).json()[
+                "tool_results"
+            ]
+            == []
+        )
         assert not any(isinstance(item, ToolMessage) for item in model.inputs[2])
 
-        saved_first = app.get(f"/api/v1/requests/{first['request_id']}").json()
-        saved_second = app.get(f"/api/v1/requests/{second['request_id']}").json()
-        assert saved_first["response"] == data
-        assert saved_first["tool_results"] == data["tool_results"]
-        assert saved_second["response"] == followup.json()
-        assert saved_second["tool_results"] == []
-    assert calls == ["/api/v1/foods", "/api/v1/goal-settings/default"]
 
-
-def test_model_failure_after_write_keeps_result_and_blocks_reexecution(app_factory):
+def test_failure_after_write_returns_partial_results_without_provider_secret(
+    app_factory, caplog
+):
     calls = []
 
     def write(request):
         calls.append(request)
         return httpx.Response(201, json={"id": 12})
 
-    app, _, _ = app_factory(
+    app, _ = app_factory(
         [
             tool_call(
                 "record_recipe",
                 dict(date="2026-10-19", meal_type="dinner", recipe_id=2),
             ),
-            RuntimeError("provider unavailable"),
+            RuntimeError("provider exposed test-key"),
         ],
         write,
     )
-    body = payload()
     with app:
-        assert app.post("/api/v1/chat", json=body).status_code == 502
-        assert app.post("/api/v1/chat", json=body).status_code == 409
-        state = app.get(f"/api/v1/requests/{body['request_id']}").json()
-        assert state["status"] == "failed"
-        assert state["tool_results"][0]["result"]["id"] == 12
-        assert len(calls) == 1
+        response = app.post("/api/v1/chat", json=payload())
+    assert response.status_code == 502
+    assert response.json()["error"]["tool_results"][0]["result"]["id"] == 12
+    assert "test-key" not in response.text + caplog.text
+    assert len(calls) == 1
 
 
 def test_uncertain_http_write_is_not_retried(app_factory):
@@ -193,7 +169,7 @@ def test_uncertain_http_write_is_not_retried(app_factory):
         calls.append(request)
         raise httpx.ReadTimeout("response lost", request=request)
 
-    app, _, _ = app_factory(
+    app, _ = app_factory(
         [
             tool_call(
                 "create_food",
@@ -208,42 +184,50 @@ def test_uncertain_http_write_is_not_retried(app_factory):
         ],
         timeout,
     )
-    body = payload()
     with app:
-        assert app.post("/api/v1/chat", json=body).status_code == 502
-        assert app.post("/api/v1/chat", json=body).status_code == 409
-        assert len(calls) == 1
+        response = app.post("/api/v1/chat", json=payload())
+    assert response.status_code == 502
+    assert response.json()["error"]["tool_results"] == []
+    assert len(calls) == 1
 
 
-def test_loop_limit_preserves_executed_tools(app_factory):
-    app, _, _ = app_factory(
+def test_loop_limit_returns_executed_tools(app_factory):
+    app, _ = app_factory(
         [tool_call("get_goal", {}) for _ in range(12)],
         lambda request: httpx.Response(200, content="null"),
     )
-    body = payload("查看目标")
     with app:
+        response = app.post("/api/v1/chat", json=payload("查看目标"))
+    assert response.status_code == 502
+    assert len(response.json()["error"]["tool_results"]) == 12
+
+
+def test_request_model_configuration_is_isolated(monkeypatch):
+    configurations, models = [], []
+
+    def build_model(**kwargs):
+        configurations.append(kwargs)
+        model = ScriptedModel([AIMessage(content="收到")])
+        models.append(model)
+        return model
+
+    monkeypatch.setattr("daily_meal_agent.main.ChatOpenAI", build_model)
+    with TestClient(create_app()) as app:
+        for key, name in [("key-a", "model-a"), ("key-b", "model-b")]:
+            body = payload("你好")
+            body["model_settings"].update(api_key=key, model=name)
+            response = app.post("/api/v1/chat", json=body)
+            assert response.status_code == 200
+            assert key not in response.text
+    assert [item["api_key"] for item in configurations] == ["key-a", "key-b"]
+    assert [item["model"] for item in configurations] == ["model-a", "model-b"]
+    assert all(len(model.inputs[0]) == 2 for model in models)
+
+
+def test_validation_error_does_not_echo_credentials():
+    with TestClient(create_app()) as app:
+        body = payload()
+        del body["model_settings"]["model"]
         response = app.post("/api/v1/chat", json=body)
-        assert response.status_code == 502
-        state = app.get(f"/api/v1/requests/{body['request_id']}").json()
-        assert len(state["tool_results"]) == 12
-
-
-def test_request_id_can_only_start_once(tmp_path):
-    log = RequestLog(str(tmp_path / "requests.sqlite3"))
-    request = ChatRequest(request_id=uuid4(), message="查询今天")
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        results = list(pool.map(lambda _: log.start(request), range(4)))
-    assert results.count(True) == 1
-
-
-def test_running_request_is_queryable_but_never_restarted(app_factory):
-    app, _, log = app_factory([], lambda request: None)
-    body = payload()
-    assert log.start(ChatRequest(**body))
-    with app:
-        assert app.post("/api/v1/chat", json=body).status_code == 409
-        assert (
-            app.get(f"/api/v1/requests/{body['request_id']}").json()["status"]
-            == "running"
-        )
-        assert app.get(f"/api/v1/requests/{uuid4()}").status_code == 404
+    assert response.status_code == 422
+    assert "test-key" not in response.text

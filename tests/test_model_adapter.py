@@ -1,5 +1,4 @@
 import json
-from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
@@ -7,11 +6,11 @@ from langchain_openai import ChatOpenAI
 
 from daily_meal_agent.client import MealClient
 from daily_meal_agent.main import create_app
-from daily_meal_agent.request_log import RequestLog
 from daily_meal_agent.service import ChatService
+from tests.conftest import payload
 
 
-def test_real_langchain_responses_adapter_with_mock_provider(tmp_path):
+def test_real_langchain_responses_adapter_with_mock_provider():
     """真实 LangChain/OpenAI SDK 序列化；HTTP 服务用模拟响应替代，无模型费用。"""
     model_requests = []
 
@@ -84,13 +83,10 @@ def test_real_langchain_responses_adapter_with_mock_provider(tmp_path):
         service = ChatService(
             model,
             MealClient(go_http),
-            RequestLog(str(tmp_path / "requests.sqlite3")),
             "Asia/Shanghai",
         )
         with TestClient(create_app(service)) as app:
-            response = app.post(
-                "/api/v1/chat", json={"request_id": str(uuid4()), "message": "查看目标"}
-            )
+            response = app.post("/api/v1/chat", json=payload("查看目标"))
         assert response.status_code == 200, response.text
         assert response.json()["reply"] == "尚未设置默认目标。"
         assert len(model_requests) == 2

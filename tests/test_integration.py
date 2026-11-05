@@ -15,10 +15,9 @@ from langchain_core.messages import AIMessage
 
 from daily_meal_agent.client import MealAPIError, MealClient
 from daily_meal_agent.main import create_app
-from daily_meal_agent.request_log import RequestLog
 from daily_meal_agent.service import ChatService
 from daily_meal_agent.tools import build_tools
-from tests.conftest import ScriptedModel, tool_call
+from tests.conftest import ScriptedModel, payload, tool_call
 
 
 @pytest.fixture(scope="module")
@@ -144,7 +143,7 @@ def test_tools_against_go_contract(go_api):
         date="2026-10-19", meal_type="lunch", food_id=food_id, quantity=0.2, unit="kg"
     )
     entry = invoke("record_food", **entry_args)
-    # 当前后端每次 POST 都新建记录；Agent 的请求重放由下一个测试验证。
+    # 当前后端每次 POST 都新建记录；重复提交不去重。
     duplicate = invoke("record_food", **entry_args)
     assert duplicate["id"] != entry["id"]
     entries = invoke("list_entries", date="2026-10-19", meal_type="lunch")["items"]
@@ -180,7 +179,7 @@ def test_tools_against_go_contract(go_api):
     assert len(invoke("list_entries", date="2026-10-19")["items"]) == 1
 
 
-def test_chat_with_real_go_and_persisted_replay(go_api, tmp_path):
+def test_single_turn_chat_with_real_go(go_api):
     food = go_api.request(
         "POST",
         "foods",
@@ -207,17 +206,12 @@ def test_chat_with_real_go_and_persisted_replay(go_api, tmp_path):
             AIMessage(content="已记录早餐牛奶 250ml。"),
         ]
     )
-    service = ChatService(
-        model, go_api, RequestLog(str(tmp_path / "requests.sqlite3")), "Asia/Shanghai"
-    )
-    body = {
-        "request_id": str(uuid4()),
-        "message": "10 月 20 日早餐喝了 250ml 对话测试牛奶",
-    }
+    service = ChatService(model, go_api, "Asia/Shanghai")
+    body = payload("10 月 20 日早餐喝了 250ml 对话测试牛奶")
     with TestClient(create_app(service)) as app:
         response = app.post("/api/v1/chat", json=body)
         assert response.status_code == 200, response.text
-        assert app.post("/api/v1/chat", json=body).json() == response.json()
+        assert len(response.json()["tool_results"]) == 2
     entries = go_api.request("GET", "meal-entries", params={"date": "2026-10-20"})
     assert len(entries["items"]) == 1
     assert entries["items"][0]["nutrition_totals"]["energy_kcal"]["known_total"] == 150

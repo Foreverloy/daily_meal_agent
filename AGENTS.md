@@ -30,7 +30,7 @@ Daily Meal Agent 是独立的 Python Agent 项目，以自然语言对话处理�
 - Python 3.11+；使用 uv 管理依赖，依赖声明与锁文件分别为 `pyproject.toml` 和 `uv.lock`。
 - FastAPI 提供 HTTP 入口，Pydantic 描述请求、响应和工具参数，LangChain 接入模型与工具，httpx 发起 HTTP 请求。
 - 保持 `main.py → service.py → tools.py → client.py` 调用路径清晰：入口处理请求，服务组织模型与工具循环，工具表达具体动作，客户端处理 HTTP 通信。
-- `prompt.py` 维护提示词，`schemas.py` 维护数据结构，`config.py` 读取配置，`request_log.py` 管理 SQLite 请求状态与执行结果。
+- `prompt.py` 维护提示词，`schemas.py` 维护数据结构，`config.py` 读取业务 API 地址和时区；模型配置由 Go 随请求传入，请求记录与执行结果由 Go 保存。
 - 模型输入、工具参数、工具返回值和最终回复应能沿调用链直接追踪。说明行为时区分提示词要求、代码实际执行和真实模型表现。
 - 从仓库根目录运行 `uv sync --frozen` 安装依赖，`make run` 启动服务；运行配置与请求示例见 README。
 - 不在代码、日志输出、文档示例或 Git 中包含 API 密钥；示例只使用占位值。
