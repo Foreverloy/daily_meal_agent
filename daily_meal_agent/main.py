@@ -63,7 +63,8 @@ def create_app(service: ChatService | None = None) -> FastAPI:
             # 上游异常可能带凭据或原始请求，只记录异常类型。
             cause = error.__cause__ or error
             logger.error(
-                "Agent request failed: %s (status=%s)",
+                "Request: %s\nAgent request failed: %s (status=%s)",
+                request,
                 type(cause).__name__,
                 getattr(cause, "status_code", None),
             )
