@@ -13,9 +13,9 @@ Developer/
   daily_meal_frontend/ 网页
 ```
 
-- Agent 负责理解用户消息、组织对话上下文、选择并执行工具，以及将工具结果交给模型生成回复。
+- Agent 当前只组织系统提示词和本条用户消息，调用一次模型并返回文字回复；工具调用暂未接入聊天流程。
 - Go 后端负责单位换算、营养计算、历史快照和最终业务写入，使用 PostgreSQL 保存业务数据。
-- Agent 只通过 HTTP/JSON 调用 Go API，不直接访问业务数据库。Go 保存模型配置及单轮请求记录；Agent 接收本次配置和消息，只返回执行结果。
+- 当前聊天流程不调用 Go 业务 API，也不直接访问业务数据库。Go 保存模型配置及单轮请求记录；Agent 接收本次配置和消息，返回文字回复与空的 `tool_results`。
 - 网页的「饮食助手」调用 Go 聊天入口；前端不传模型凭据，不加载历史上下文。
 
 ## 产品与接口依据
@@ -32,21 +32,22 @@ Developer/
 ## 调用与运行
 
 ```text
-网页 → Go /api/v1/chat → Agent main.py → service.py → tools.py → client.py
-  → Go HTTP API → Handler → Service → Store → PostgreSQL
+网页 → Go /api/v1/chat → Agent main.py → service.py → 模型
+                     ← reply / tool_results=[]
+       Go 保存单轮记录 → 返回网页
 ```
 
-`schemas.py` 描述 Agent 输入和工具参数的形状，不另建业务参数校验，也不重复实现营养计算。模型通过工具取得业务数据，写入结果以 Go API 的实际返回为依据。
+`schemas.py` 描述 Agent 输入、响应和保留的工具参数。`tools.py`、`client.py` 及其独立测试保留，当前聊天服务不加载或执行这些工具，因此不能查询营养、记录饮食或修改目标。
 
-本机运行时，`MEAL_API_URL` 默认指向 `http://127.0.0.1:8080`，可配置为实际 API 地址；连接已运行的 API 不要求后端源码位于本机。Agent 与后端的 `BUSINESS_TIMEZONE` 应一致，默认 `Asia/Shanghai`。
+现有 `MEAL_API_URL` 配置保留，但当前聊天流程不使用，也不创建业务 HTTP 客户端。Agent 与后端的 `BUSINESS_TIMEZONE` 应一致，默认 `Asia/Shanghai`。
 
-当前 `compose.yaml` 通过 `include` 引用 `../daily_meal/compose.yaml`，容器内通过 `http://api:8080` 访问后端，因此这一套 Compose 启动方式需要相邻后端仓库。具体启动步骤见 [Agent README](../README.md)。
+当前 `compose.yaml` 通过 `include` 引用 `../daily_meal/compose.yaml`，这一套 Compose 启动方式需要相邻后端仓库。Go 仍负责聊天入口和记录保存，Agent 只访问模型服务。具体启动步骤见 [Agent README](../README.md)。
 
 Agent 的 `/healthz` 只表示自身完成初始化，不探测模型或 Go API 的可用性。
 
 ## 集成测试
 
-离线测试使用脚本模型与模拟 HTTP，可独立运行。真实集成测试的调用范围是 Python Agent → Go API → PostgreSQL，前提为：
+离线测试使用脚本模型与模拟 HTTP，可独立运行。真实集成测试单独验证保留的工具 → Go API → PostgreSQL，并检查文字对话不会新增饮食记录，前提为：
 
 - 安装 Go 和 `psql`，并具备后端源码；默认使用相邻 `../daily_meal`，也可通过 `DAILY_MEAL_BACKEND_DIR` 指定后端仓库根目录。
 - 使用 `TEST_DATABASE_URL` 指定名称以 `_test` 结尾的独立数据库，不能使用个人饮食数据库。
@@ -54,12 +55,12 @@ Agent 的 `/healthz` 只表示自身完成初始化，不探测模型或 Go API 
 
 满足条件后，从 Agent 仓库根目录运行 `make test-integration`。`make test` 也会收集集成测试，但未设置 `TEST_DATABASE_URL` 时会跳过；交付时须说明这一点。
 
-集成测试仍使用脚本模型，只验证接口、编排和数据链路，不代表真实模型理解、截图识别或前端交互已通过验收。Go 侧另有聊天入口测试，验证默认配置传递、独立执行与数据库记录。
+集成测试中的聊天仍使用脚本模型，不代表真实模型理解或前端交互已通过验收，也不表示工具已接回聊天流程。Go 侧另有聊天入口测试，验证默认配置传递、独立执行与数据库记录。
 
-## 请求失败与写入结果
+## 请求失败与记录
 
-一次对话可能调用多个工具，这些调用不共享一个业务事务。Agent 在失败响应中返回已经收到的工具结果，Go 保存到 `chat_requests` 并返回错误。连接或进程中断可能使记录不完整，先核对实际业务数据。
+模型调用失败或未返回文字时，Agent 返回 `502` 和空的工具结果，Go 保存失败记录。聊天流程没有业务工具写入，也不再包含部分工具结果或工具回滚处理。
 
-本次按用户确认的范围，将新请求记录交给 Go 保存，但暂不读取历史、不重放结果。Agent 不再使用 SQLite、request_id 或状态查询接口；旧 SQLite 文件不自动迁移或删除。每条消息独立执行，重复发送可能重复写入，前端发送期间禁用按钮；服务不自动重试。
+新请求记录由 Go 保存，暂不读取历史、不重放结果。Agent 不使用 SQLite、request_id 或状态查询接口；旧 SQLite 文件不自动迁移或删除。每条消息独立执行，重复发送会重新调用模型并创建聊天记录，前端发送期间禁用按钮；服务不自动重试。
 
 默认模型配置固定读取 Go 的 `backend/config/agent.yaml` 中 `default` 项。模型凭据由 Go 传给 Agent，只用于创建模型客户端，不进入单轮数据库记录或前端响应。

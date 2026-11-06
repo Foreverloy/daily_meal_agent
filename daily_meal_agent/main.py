@@ -7,25 +7,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from langchain_openai import ChatOpenAI
 
-from daily_meal_agent.client import MealClient
 from daily_meal_agent.config import Settings
 from daily_meal_agent.schemas import ChatRequest, ChatResponse
 from daily_meal_agent.service import AgentError, ChatService
 
 logger = logging.getLogger(__name__)
 MODEL_TIMEOUT_SECONDS = 60
-API_TIMEOUT_SECONDS = 15
 
 
 def create_app(service: ChatService | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.settings = Settings()
-        with httpx.Client(
-            base_url=app.state.settings.meal_api_url, timeout=API_TIMEOUT_SECONDS
-        ) as http:
-            app.state.client = MealClient(http)
-            yield
+        yield
 
     app = FastAPI(title="Daily Meal Agent", version="0.2.0", lifespan=lifespan)
 
@@ -55,9 +49,7 @@ def create_app(service: ChatService | None = None) -> FastAPI:
                     max_retries=0,
                     http_client=model_http,
                 )
-                chat_service = ChatService(
-                    model, app.state.client, app.state.settings.business_timezone
-                )
+                chat_service = ChatService(model, app.state.settings.business_timezone)
                 return chat_service.chat(request)
         except Exception as error:
             # 上游异常可能带凭据或原始请求，只记录异常类型。
@@ -68,16 +60,12 @@ def create_app(service: ChatService | None = None) -> FastAPI:
                 type(cause).__name__,
                 getattr(cause, "status_code", None),
             )
-            message = (
-                "模型或业务接口调用失败，部分操作可能已经保存，请先查看相关饮食数据。"
-            )
-            results = []
+            message = "模型调用失败，请稍后再试。"
             if isinstance(error, AgentError):
                 message = str(error)
-                results = [item.model_dump(mode="json") for item in error.tool_results]
             return JSONResponse(
                 status_code=502,
-                content={"error": {"message": message, "tool_results": results}},
+                content={"error": {"message": message, "tool_results": []}},
             )
 
     return app

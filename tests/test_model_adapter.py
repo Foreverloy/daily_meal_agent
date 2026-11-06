@@ -4,7 +4,6 @@ import httpx
 from fastapi.testclient import TestClient
 from langchain_openai import ChatOpenAI
 
-from daily_meal_agent.client import MealClient
 from daily_meal_agent.main import create_app
 from daily_meal_agent.service import ChatService
 from tests.conftest import payload
@@ -18,36 +17,25 @@ def test_real_langchain_responses_adapter_with_mock_provider():
         body = json.loads(request.content)
         model_requests.append(body)
         assert request.url.path == "/v1/responses"
-        assert body["parallel_tool_calls"] is False
-        assert any(t["name"] == "get_goal" for t in body["tools"])
-        if len(model_requests) == 1:
-            output = [
-                {
-                    "id": "fc_1",
-                    "type": "function_call",
-                    "call_id": "call_1",
-                    "name": "get_goal",
-                    "arguments": "{}",
-                    "status": "completed",
-                }
-            ]
-        else:
-            assert any(item["type"] == "function_call_output" for item in body["input"])
-            output = [
-                {
-                    "id": "msg_1",
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": "尚未设置默认目标。",
-                            "annotations": [],
-                        }
-                    ],
-                }
-            ]
+        assert "parallel_tool_calls" not in body
+        assert "tools" not in body
+        assert "tool_choice" not in body
+        assert [item["role"] for item in body["input"]] == ["system", "user"]
+        output = [
+            {
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "你好，我是你的饮食助手。",
+                        "annotations": [],
+                    }
+                ],
+            }
+        ]
         return httpx.Response(
             200,
             json={
@@ -63,15 +51,7 @@ def test_real_langchain_responses_adapter_with_mock_provider():
             },
         )
 
-    with (
-        httpx.Client(transport=httpx.MockTransport(provider)) as model_http,
-        httpx.Client(
-            base_url="http://go",
-            transport=httpx.MockTransport(
-                lambda req: httpx.Response(200, content="null")
-            ),
-        ) as go_http,
-    ):
+    with httpx.Client(transport=httpx.MockTransport(provider)) as model_http:
         model = ChatOpenAI(
             model="test-model",
             api_key="test-key",
@@ -80,13 +60,12 @@ def test_real_langchain_responses_adapter_with_mock_provider():
             http_client=model_http,
             max_retries=0,
         )
-        service = ChatService(
-            model,
-            MealClient(go_http),
-            "Asia/Shanghai",
-        )
+        service = ChatService(model, "Asia/Shanghai")
         with TestClient(create_app(service)) as app:
-            response = app.post("/api/v1/chat", json=payload("查看目标"))
+            response = app.post("/api/v1/chat", json=payload())
         assert response.status_code == 200, response.text
-        assert response.json()["reply"] == "尚未设置默认目标。"
-        assert len(model_requests) == 2
+        assert response.json() == {
+            "reply": "你好，我是你的饮食助手。",
+            "tool_results": [],
+        }
+        assert len(model_requests) == 1

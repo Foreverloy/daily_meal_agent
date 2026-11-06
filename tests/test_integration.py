@@ -17,7 +17,7 @@ from daily_meal_agent.client import MealAPIError, MealClient
 from daily_meal_agent.main import create_app
 from daily_meal_agent.service import ChatService
 from daily_meal_agent.tools import build_tools
-from tests.conftest import ScriptedModel, payload, tool_call
+from tests.conftest import ScriptedModel, payload
 
 
 @pytest.fixture(scope="module")
@@ -179,39 +179,17 @@ def test_tools_against_go_contract(go_api):
     assert len(invoke("list_entries", date="2026-10-19")["items"]) == 1
 
 
-def test_single_turn_chat_with_real_go(go_api):
-    food = go_api.request(
-        "POST",
-        "foods",
-        body={
-            "name": "对话测试牛奶",
-            "basis_unit": "ml",
-            "nutrition_per_100": {"energy_kcal": 60},
-        },
-    )
+def test_text_chat_does_not_create_entries_in_go(go_api):
+    before = go_api.request("GET", "meal-entries", params={"date": "2026-10-20"})
     model = ScriptedModel(
-        [
-            tool_call("search_foods", {"query": "对话测试牛奶"}),
-            tool_call(
-                "record_food",
-                dict(
-                    date="2026-10-20",
-                    meal_type="breakfast",
-                    food_id=food["id"],
-                    quantity=250,
-                    unit="ml",
-                ),
-                "call_2",
-            ),
-            AIMessage(content="已记录早餐牛奶 250ml。"),
-        ]
+        [AIMessage(content="当前只能进行文字对话，尚不能保存饮食记录。")]
     )
-    service = ChatService(model, go_api, "Asia/Shanghai")
+    service = ChatService(model, "Asia/Shanghai")
     body = payload("10 月 20 日早餐喝了 250ml 对话测试牛奶")
     with TestClient(create_app(service)) as app:
         response = app.post("/api/v1/chat", json=body)
         assert response.status_code == 200, response.text
-        assert len(response.json()["tool_results"]) == 2
+        assert response.json()["tool_results"] == []
+        assert len(model.inputs) == 1
     entries = go_api.request("GET", "meal-entries", params={"date": "2026-10-20"})
-    assert len(entries["items"]) == 1
-    assert entries["items"][0]["nutrition_totals"]["energy_kcal"]["known_total"] == 150
+    assert entries == before
