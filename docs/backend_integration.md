@@ -27,7 +27,7 @@ Developer/
 
 修改工具参数、接口路径或响应处理时，先核对 OpenAPI 与实际接口行为。发现接口或实现与已确认产品需求冲突时，说明差异；对产品文档的修改仍遵守本仓库 AGENTS.md 中的审查要求。
 
-当前 OpenAPI 标记为 2.1.0，路由仍为 `/api/v1`。后端已移除严格业务参数校验和 `Idempotency-Key` 创建去重，假定调用方提交符合约定的输入；仍返回解析、类型、资源不存在和服务错误。产品文档中的部分校验、原子保存和重试去重验收要求尚未满足，不能将当前实现视为这些要求已经通过验收。
+当前 OpenAPI 标记为 2.2.0，路由仍为 `/api/v1`。后端已移除严格业务参数校验和 `Idempotency-Key` 创建去重，假定调用方提交符合约定的输入；仍返回解析、类型、资源不存在和服务错误。截图接口另用 `422` 表示识别信息不足或营养基准不匹配。产品文档中的部分校验、原子保存和重试去重验收要求尚未满足，不能将当前实现视为这些要求已经通过验收。
 
 ## 调用与运行
 
@@ -46,6 +46,10 @@ Developer/
 Agent 的 `/healthz` 只表示自身完成初始化，不探测模型或 Go API 的可用性。
 
 ## 集成测试
+
+截图链路为：网页食物表单 → Go `POST /api/v1/foods/from-image` 或 `PATCH /api/v1/foods/{id}/from-image` → Python `POST /api/v1/food-recognitions` → 视觉模型提取原始数据 → Go 换算 → 食物 Service / Store 保存 → 返回食物详情。
+
+Python 请求包含 `image_data_url` 和 `model_settings`，返回 `name`、`basis_quantity`、`basis_unit` 和 `nutrients` 数组（每项为 `key/value/unit`）。模型需同时支持视觉输入和 JSON 输出。Go 完成每 100g/ml、kJ/kcal 和营养素 g/mg/ug 换算；更新只提交已识别营养，保留缺项。原图和识别请求不持久化，Python 不直接访问业务数据库。普通聊天保持现有文字行为。
 
 离线测试使用脚本模型与模拟 HTTP，可独立运行。真实集成测试单独验证保留的工具 → Go API → PostgreSQL，并检查文字对话不会新增饮食记录，前提为：
 
